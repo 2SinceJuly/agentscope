@@ -474,7 +474,12 @@ class MessageBus(ABC):  # pylint: disable=too-many-public-methods
 
     @abstractmethod
     async def unlock(self, key: str) -> None:
-        """Release a lock claimed via :meth:`try_lock` (best-effort)."""
+        """Release a lock claimed by this task via :meth:`try_lock`.
+
+        The claim belongs to the task that called :meth:`try_lock`. If
+        that lease has already expired and another task holds ``key``,
+        this call leaves the new owner's claim intact.
+        """
 
     # ------------------------------------------------------------------
     # Mode F — registry map (hash-keyed namespace)

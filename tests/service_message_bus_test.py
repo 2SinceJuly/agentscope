@@ -625,6 +625,46 @@ class TestLockPrimitive(IsolatedAsyncioTestCase):
                 task.cancel()
                 await asyncio.gather(task, return_exceptions=True)
 
+    async def test_expired_try_lock_holder_cannot_free_successor(
+        self,
+    ) -> None:
+        """A late ``unlock`` from a lease that already expired must not
+        delete the lease a successor has since claimed."""
+        claimed = asyncio.Event()
+        release = asyncio.Event()
+
+        async def _task_a() -> None:
+            self.assertTrue(await self.bus.try_lock("k", ttl_secs=10))
+            claimed.set()
+            await release.wait()
+            await self.bus.unlock("k")
+
+        task_a = asyncio.create_task(_task_a())
+        await claimed.wait()
+
+        # Task A overruns its lease: the key disappears, task B claims it.
+        await self.fr.delete("k")
+        self.assertTrue(await self.bus.try_lock("k", ttl_secs=10))
+        successor_value = await self.fr.get("k")
+        self.assertIsNotNone(successor_value)
+
+        # Task A finally reaches its ``unlock``.
+        release.set()
+        await task_a
+
+        self.assertEqual(await self.fr.get("k"), successor_value)
+        self.assertFalse(await self.bus.try_lock("k", ttl_secs=10))
+
+    async def test_unlock_without_a_claim_is_a_noop(self) -> None:
+        """``unlock`` on a key this caller never claimed deletes nothing."""
+        self.assertFalse(await self.bus.is_locked("k"))
+        await self.bus.unlock("k")
+        self.assertFalse(await self.bus.is_locked("k"))
+
+        self.assertTrue(await self.bus.try_lock("k", ttl_secs=10))
+        self.assertFalse(await self.bus.try_lock("k", ttl_secs=10))
+        self.assertTrue(await self.bus.is_locked("k"))
+
     async def test_heartbeat_does_not_renew_another_owner(self) -> None:
         """A stale holder cannot extend or delete a replacement lease."""
         async with self.bus.acquire_lock("ownership", ttl_secs=2):

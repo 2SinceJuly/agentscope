@@ -81,6 +81,11 @@ class InMemoryMessageBus(
         # key -> monotonic expiry deadline; ``acquire_lock`` has no
         # lease, so it stores infinity.
         self._lock_holders: dict[str, float] = {}
+        # Mode E — ownership of ``try_lock`` leases:
+        # key -> the task that claimed it. ``unlock`` only releases a
+        # lease this task owns, so an expired holder cannot free the key
+        # a successor has since claimed.
+        self._try_lock_owners: dict[str, asyncio.Task | None] = {}
 
         # Mode F — registry maps: namespace -> {field: value}
         self._registries: dict[str, dict[str, str]] = defaultdict(dict)
@@ -471,10 +476,17 @@ class InMemoryMessageBus(
         # The lease keeps a crashed holder from blocking the key
         # forever, the contract the Redis bus gets from SET NX EX.
         self._lock_holders[key] = time.monotonic() + ttl_secs
+        self._try_lock_owners[key] = asyncio.current_task()
         return True
 
     async def unlock(self, key: str) -> None:
-        """Release a ``try_lock`` claim."""
+        """Release a ``try_lock`` claim held by the calling task."""
+        # Only the task that claimed ``key`` may release it: if our lease
+        # expired and a successor already claimed it, this is a no-op.
+        owner = self._try_lock_owners.get(key)
+        if owner is None or owner is not asyncio.current_task():
+            return
+        self._try_lock_owners.pop(key, None)
         self._lock_holders.pop(key, None)
 
     # ------------------------------------------------------------------
